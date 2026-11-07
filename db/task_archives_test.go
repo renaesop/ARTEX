@@ -99,7 +99,7 @@ func TestWriteArchiveRowsProducesJSONSequence(t *testing.T) {
 }
 
 func TestTaskArchiveFormatCompatibility(t *testing.T) {
-	for _, version := range []int{TaskArchiveLegacyFormatVersion, TaskArchiveFormatVersion} {
+	for _, version := range []int{1, 2, 3, TaskArchiveFormatVersion} {
 		if !IsTaskArchiveFormatSupported(version) {
 			t.Fatalf("archive format %d should be supported", version)
 		}
@@ -263,11 +263,16 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	if err != nil || claimed == nil || claimed.State != Restoring {
 		t.Fatalf("restore claim = %+v, %v", claimed, err)
 	}
+	linkWarning := `Workspace symlink "outside" -> "/opt/example" was not restored`
 	warnings, err := d.RestoreTaskArchiveWithLLMRecords(
-		archive.ID, snapshot, int64((10 * time.Minute).Seconds()), bytes.NewReader(llmRecords.Bytes()),
+		archive.ID, snapshot, int64((10 * time.Minute).Seconds()), bytes.NewReader(llmRecords.Bytes()), linkWarning,
 	)
 	if err != nil {
 		t.Fatal(err)
+	}
+	var notice bool
+	if err := d.QueryRow(`SELECT EXISTS(SELECT 1 FROM activity WHERE exploration_id=$1 AND position($2 IN detail)>0)`, task.ExplorationID, linkWarning).Scan(&notice); err != nil || !notice {
+		t.Fatalf("missing restored workspace link notice: found=%t err=%v", notice, err)
 	}
 	warningFound := false
 	for _, warning := range warnings {

@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	TaskArchiveFormatVersion       = 3
+	TaskArchiveFormatVersion       = 4
 	TaskArchiveLegacyFormatVersion = 1
 	TaskArchiveLLMRecordsPath      = "database/llm_records.ndjson"
 )
@@ -112,10 +112,17 @@ type TaskArchivePage struct {
 	Size  int           `json:"size"`
 }
 
+// TaskArchiveWorkspaceLinks records link targets without reading or packaging their contents.
+type TaskArchiveWorkspaceLinks struct {
+	OriginalRoot string            `json:"original_root"`
+	Targets      map[string]string `json:"targets"` // workspace-relative name -> original readlink text
+}
+
 // TaskArchiveSnapshot is serialized into manifest.json inside the cold package.
 // Small tables remain JSON arrays in Tables. Large v2 tables are streamed to
 // package files listed in StreamedTables so their size is not bounded by memory.
 type TaskArchiveSnapshot struct {
+	WorkspaceLinks    *TaskArchiveWorkspaceLinks `json:"workspace_links,omitempty"`
 	FormatVersion     int                        `json:"format_version"`
 	CreatedAt         time.Time                  `json:"created_at"`
 	TaskID            int64                      `json:"task_id"`
