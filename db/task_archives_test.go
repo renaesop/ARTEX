@@ -205,7 +205,10 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	if _, err := d.Exec(`INSERT INTO submission_profiles (id,payload) VALUES ($1,'{}')`, disclosureID); err != nil {
 		t.Fatal(err)
 	}
-	defer d.Exec(`DELETE FROM submission_profiles WHERE id=$1`, disclosureID)
+	defer func() {
+		_, _ = d.Exec(`DELETE FROM submission_drafts WHERE id=$1`, disclosureID)
+		_, _ = d.Exec(`DELETE FROM submission_profiles WHERE id=$1`, disclosureID)
+	}()
 	if _, err := d.Exec(`INSERT INTO submission_drafts (id,finding_id,profile_id,payload) VALUES ($1,$2,$1,'{"body":"original"}')`, disclosureID, findingID); err != nil {
 		t.Fatal(err)
 	}
@@ -243,6 +246,10 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 		t.Fatal(err)
 	}
 	if err := d.CompleteTaskArchive(archive.ID, snapshot, "/tmp/test-task.tar.zst", "abc", 100, 50); err != nil {
+		t.Fatal(err)
+	}
+	// Cold drafts can outlive a removed global profile.
+	if _, err := d.Exec(`DELETE FROM submission_profiles WHERE id=$1`, disclosureID); err != nil {
 		t.Fatal(err)
 	}
 	if live, err := d.GetTask(task.ID); err != nil || live != nil {
