@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -519,11 +518,21 @@ func stageTaskArchivePackageDelete(archivePath string, archiveID int64) (string,
 	return staged, false, nil
 }
 
-func writeTaskArchivePackage(path, payloadDir string, snapshot *pgdb.TaskArchiveSnapshot) (originalSize, compressedSize int64, checksum string, err error) {
+func writeTaskArchivePackage(path, payloadDir, originalWorkspace string, snapshot *pgdb.TaskArchiveSnapshot) (originalSize, compressedSize int64, checksum string, err error) {
 	if snapshot == nil {
 		return 0, 0, "", errors.New("nil task archive snapshot")
 	}
+	payload, err := os.OpenRoot(payloadDir)
+	if err != nil {
+		return 0, 0, "", err
+	}
+	defer payload.Close()
 	if err = os.MkdirAll(filepath.Dir(path), archiveDirMode); err != nil {
+		return 0, 0, "", err
+	}
+	stagedWorkspace := filepath.Join(payloadDir, "files", "tasks", strconv.FormatInt(snapshot.TaskID, 10))
+	snapshot.WorkspaceLinks, err = collectWorkspaceLinks(stagedWorkspace, originalWorkspace)
+	if err != nil {
 		return 0, 0, "", err
 	}
 	manifestFile, err := os.OpenFile(
@@ -578,10 +587,7 @@ func writeTaskArchivePackage(path, payloadDir string, snapshot *pgdb.TaskArchive
 			return err
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			// The archive format supports only regular files and directories end to end (the
-			// unpacker errors out on other types), so symlinks cannot be restored. Skip rather
-			// than fail the whole package: the link target is not read (lstat, never leaves the tree) and no symlink entry is written; when a link points inside the tree, the target file itself is still walked and archived separately.
-			log.Printf("[task-archive] skipping symlink (unsupported by the archive, other files unaffected): %s", current)
+			// Workspace links are in the manifest. Never open their targets.
 			return nil
 		}
 		header, err := tar.FileInfoHeader(info, "")
@@ -596,9 +602,14 @@ func writeTaskArchivePackage(path, payloadDir string, snapshot *pgdb.TaskArchive
 			return nil
 		}
 		originalSize += info.Size()
-		input, err := os.Open(current)
+		input, err := payload.Open(relative)
 		if err != nil {
 			return err
+		}
+		opened, err := input.Stat()
+		if err != nil || !os.SameFile(info, opened) {
+			_ = input.Close()
+			return fmt.Errorf("task archive input changed during packaging: %s", relative)
 		}
 		_, copyErr := io.Copy(tarWriter, input)
 		closeErr := input.Close()

@@ -207,7 +207,7 @@ func (s *Server) archiveTask(job *pgdb.TaskArchive) (runErr error) {
 		return err
 	}
 	_ = s.m.pg.UpdateTaskArchiveProgress(job.ID, "compress", 50)
-	originalSize, compressedSize, checksum, err := writeTaskArchivePackage(archivePath, fileStage.payload, snapshot)
+	originalSize, compressedSize, checksum, err := writeTaskArchivePackage(archivePath, fileStage.payload, filepath.Join(s.m.dir, "tasks", taskID), snapshot)
 	if err != nil {
 		return err
 	}
@@ -357,6 +357,11 @@ func (s *Server) restoreTaskArchivePayload(job *pgdb.TaskArchive, snapshot *pgdb
 			}
 		}()
 	}
+	workspace := filepath.Join(extracted, "files", "tasks", strconv.FormatInt(job.TaskID, 10))
+	linkWarnings, err := restoreWorkspaceLinks(workspace, snapshot)
+	if err != nil {
+		return err
+	}
 	if s.m.traffic != nil {
 		_ = s.m.pg.UpdateTaskArchiveProgress(job.ID, "restore_traffic", 35)
 		if _, err := s.m.traffic.ImportArchive(filepath.Join(extracted, "traffic")); err != nil {
@@ -378,26 +383,19 @@ func (s *Server) restoreTaskArchivePayload(job *pgdb.TaskArchive, snapshot *pgdb
 	var warnings []string
 	if llmRecordsFile != nil {
 		warnings, err = s.m.pg.RestoreTaskArchiveWithLLMRecords(
-			job.ID, snapshot, job.RemainingTimeoutSeconds, llmRecordsFile,
+			job.ID, snapshot, job.RemainingTimeoutSeconds, llmRecordsFile, linkWarnings...,
 		)
 		closeErr := llmRecordsFile.Close()
 		llmRecordsFile = nil
 		err = errors.Join(err, closeErr)
 	} else {
-		warnings, err = s.m.pg.RestoreTaskArchive(job.ID, snapshot, job.RemainingTimeoutSeconds)
+		warnings, err = s.m.pg.RestoreTaskArchive(job.ID, snapshot, job.RemainingTimeoutSeconds, linkWarnings...)
 	}
 	if err != nil {
 		return err
 	}
 	for _, warning := range warnings {
 		log.Printf("[task-archive] restored task %d with warning: %s", job.TaskID, warning)
-	}
-	if len(warnings) > 0 {
-		if _, err := s.m.pg.Exploration(snapshot.ExplorationID).AppendActivity(pgdb.Activity{
-			Worker: "system", Kind: "system", Summary: "task restore completed, but some associations were degraded", Detail: strings.Join(warnings, "\n"),
-		}); err != nil {
-			log.Printf("[task-archive] persist restore warnings for task %d: %v", job.TaskID, err)
-		}
 	}
 	databaseRestored = true
 	if err := files.commit(); err != nil {
