@@ -59,7 +59,7 @@ func TestTaskArchivePackageFilesRoundTrip(t *testing.T) {
 		FormatVersion: pgdb.TaskArchiveFormatVersion, TaskID: 42, ExplorationID: explorationID,
 		StreamedTables: map[string]string{"llm_records": pgdb.TaskArchiveLLMRecordsPath},
 	}
-	original, compressed, checksum, err := writeTaskArchivePackage(archivePath, stage.payload, snapshot)
+	original, compressed, checksum, err := writeTaskArchivePackage(archivePath, stage.payload, filepath.Join(dataDir, "tasks", taskID), snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestTaskArchivePackageFilesRoundTrip(t *testing.T) {
 	}
 }
 
-func TestTaskArchivePackageSkipsSymlink(t *testing.T) {
+func TestArchivePayloadOutsideWorkspaceSkipsSymlink(t *testing.T) {
 	dataDir := t.TempDir()
 	payload := filepath.Join(dataDir, "payload")
 	if err := os.MkdirAll(payload, archiveDirMode); err != nil {
@@ -111,7 +111,7 @@ func TestTaskArchivePackageSkipsSymlink(t *testing.T) {
 
 	archivePath := filepath.Join(dataDir, "archive.tar.zst")
 	snapshot := &pgdb.TaskArchiveSnapshot{FormatVersion: pgdb.TaskArchiveFormatVersion, TaskID: 42}
-	_, _, checksum, err := writeTaskArchivePackage(archivePath, payload, snapshot)
+	_, _, checksum, err := writeTaskArchivePackage(archivePath, payload, filepath.Join(dataDir, "tasks", "42"), snapshot)
 	if err != nil {
 		t.Fatalf("archive should skip symlink, not fail: %v", err)
 	}

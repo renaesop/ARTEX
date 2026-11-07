@@ -140,8 +140,8 @@ WHERE id=$1`, archiveID, ArchiveReady, archivePath, sha256, originalSize, compre
 // RestoreTaskArchive restores PostgreSQL rows from a verified manifest. It is
 // idempotent for accounting/traffic retry scenarios and returns non-fatal
 // warnings for global objects that intentionally are not recreated.
-func (d *DB) RestoreTaskArchive(archiveID int64, snapshot *TaskArchiveSnapshot, remainingTimeoutSeconds int64) ([]string, error) {
-	return d.restoreTaskArchive(archiveID, snapshot, remainingTimeoutSeconds, nil)
+func (d *DB) RestoreTaskArchive(archiveID int64, snapshot *TaskArchiveSnapshot, remainingTimeoutSeconds int64, fileWarnings ...string) ([]string, error) {
+	return d.restoreTaskArchive(archiveID, snapshot, remainingTimeoutSeconds, nil, fileWarnings)
 }
 
 // RestoreTaskArchiveWithLLMRecords restores a v2 package whose heavyweight LLM
@@ -151,11 +151,12 @@ func (d *DB) RestoreTaskArchiveWithLLMRecords(
 	snapshot *TaskArchiveSnapshot,
 	remainingTimeoutSeconds int64,
 	llmRecords io.Reader,
+	fileWarnings ...string,
 ) ([]string, error) {
 	if llmRecords == nil {
 		return nil, errors.New("nil streamed LLM record reader")
 	}
-	return d.restoreTaskArchive(archiveID, snapshot, remainingTimeoutSeconds, llmRecords)
+	return d.restoreTaskArchive(archiveID, snapshot, remainingTimeoutSeconds, llmRecords, fileWarnings)
 }
 
 func (d *DB) restoreTaskArchive(
@@ -163,6 +164,7 @@ func (d *DB) restoreTaskArchive(
 	snapshot *TaskArchiveSnapshot,
 	remainingTimeoutSeconds int64,
 	llmRecords io.Reader,
+	fileWarnings []string,
 ) ([]string, error) {
 	if snapshot == nil || !IsTaskArchiveFormatSupported(snapshot.FormatVersion) {
 		return nil, ErrTaskArchiveFormatMismatch
@@ -194,7 +196,7 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	if state != Restoring || taskID != snapshot.TaskID || expID != snapshot.ExplorationID {
 		return nil, fmt.Errorf("%w: restore snapshot identity/state mismatch", ErrTaskArchiveState)
 	}
-	warnings := []string{}
+	warnings := append([]string{}, fileWarnings...)
 	assetMap, assetWarnings, err := restoreArchiveAssets(tx, taskID, snapshot.Tables["assets"])
 	if err != nil {
 		return nil, err
@@ -293,6 +295,13 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	}
 	if err := restoreInterceptRows(tx, remappedTables["intercept_pending"]); err != nil {
 		return nil, err
+	}
+	// The archive is consumed after restore, so keep the notice with the restored task.
+	if len(warnings) > 0 {
+		if _, err := tx.Exec(`INSERT INTO activity(exploration_id, worker, kind, summary, detail)
+VALUES ($1,'system','system','task restore completed with warnings',$2)`, expID, strings.Join(warnings, "\n")); err != nil {
+			return nil, err
+		}
 	}
 	warningsRaw, _ := json.Marshal(warnings)
 	if _, err := tx.Exec(`UPDATE task_archives SET warnings=$2,phase='database_restored',progress=85,error='' WHERE id=$1`, archiveID, string(warningsRaw)); err != nil {
