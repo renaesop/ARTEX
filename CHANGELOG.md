@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- **Ollama support**: an `ollama` LLM profile format for a local or LAN Ollama server. Keyless by design: no API key is needed, `OPENAI_API_KEY` is never inherited, the base URL defaults to `http://127.0.0.1:11434/v1` and is normalized to the `/v1` root, and the profile works in the failover pool, task LLM chains, model listing and connection tests. Contributed by @glauberportella (#128).
+
 ## [0.4.0] - 2026-10-23
 
 First release of this fork. The engine underneath is still upstream's, but this tree carries a long stretch of operational work on top of it: a recon toolbox and skills, findings discipline, cost accounting, and container packaging.
