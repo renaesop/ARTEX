@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Autumn-27/artex/agent"
@@ -122,6 +123,7 @@ type Server struct {
 	archiveStore    *archivestore.Store
 	archiveStoreErr error
 	side            *sideQuestionState
+	submissionBusy  atomic.Bool
 }
 
 // provEntry is a cached provider + its config for one LLM profile id.
@@ -764,6 +766,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/findings/asset-tree", s.findingAssetTree)
 	mux.HandleFunc("GET /api/exploration/findings/stats", s.findingStats)
 	mux.HandleFunc("GET /api/exploration/findings/export", s.findingsExport)
+	mux.HandleFunc("GET /api/submission-profiles", s.submissionProfiles)
+	mux.HandleFunc("PUT /api/submission-profiles", s.saveSubmissionProfile)
+	mux.HandleFunc("POST /api/exploration/findings/{id}/submission", s.prepareSubmission)
+	mux.HandleFunc("GET /api/submissions/{id}", s.getSubmission)
+	mux.HandleFunc("PATCH /api/submissions/{id}", s.editSubmission)
+	mux.HandleFunc("POST /api/submissions/{id}/generate", s.generateSubmission)
+	mux.HandleFunc("POST /api/submissions/{id}/confirm", s.confirmSubmission)
+	mux.HandleFunc("POST /api/submissions/{id}/reset", s.resetSubmission)
+	mux.HandleFunc("GET /api/submissions/{id}/export", s.exportSubmission)
 	s.registerFindingTraffic(mux)
 	mux.HandleFunc("GET /api/exploration/findings/{id}", s.getFinding)
 	mux.HandleFunc("GET /api/exploration/findings/{id}/lineage", s.findingLineage)

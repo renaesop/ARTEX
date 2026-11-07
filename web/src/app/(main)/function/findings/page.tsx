@@ -956,6 +956,14 @@ export default function FindingsPage() {
             <Button size="sm" variant="outline" onClick={openExport}>
               <DownloadIcon /> Export
             </Button>
+            {selectedIds.size > 0 && selectedIds.size <= 20 && (
+              <Button size="sm" asChild>
+                <Link href={`/function/findings/submit?ids=${encodeURIComponent([...selectedIds].join(","))}`}>
+                  提交预览 ({selectedIds.size})
+                </Link>
+              </Button>
+            )}
+            {selectedIds.size > 20 && <span className="text-xs text-muted-foreground">提交预览每次最多 20 条</span>}
           </div>
         </div>
 
