@@ -81,6 +81,18 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 	if _, err := tx.Exec(`DELETE FROM side_question_sessions WHERE task_id=$1`, taskID); err != nil {
 		return err
 	}
+	// Deleting findings cascades to drafts. Recheck after locking out writers, as
+	// compression and upload may have allowed an operator to edit a draft.
+	if _, err := tx.Exec(`LOCK TABLE submission_drafts IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+		return err
+	}
+	currentDrafts, _, err := queryArchiveRows(tx, archiveSubmissionDrafts, taskID)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(currentDrafts, snapshot.Tables["submission_drafts"]) {
+		return errors.New("submission drafts changed during archiving; retry to capture the latest edits")
+	}
 	if _, err := tx.Exec(`DELETE FROM findings WHERE task_id=$1`, taskID); err != nil {
 		return err
 	}
@@ -273,6 +285,17 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 		if err := insertArchiveRows(tx, table, remappedTables[table]); err != nil {
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
+	}
+	// Profiles are shared across tasks. Recreate a missing profile, but keep any
+	// newer live rules when restoring its drafts. Earlier formats have neither table.
+	if raw := remappedTables["submission_profiles"]; rawRowCount(raw) > 0 {
+		if _, err := tx.Exec(`INSERT INTO submission_profiles SELECT * FROM
+json_populate_recordset(NULL::submission_profiles,$1::json) ON CONFLICT (id) DO NOTHING`, string(raw)); err != nil {
+			return nil, fmt.Errorf("restore submission profiles: %w", err)
+		}
+	}
+	if err := insertArchiveRows(tx, "submission_drafts", remappedTables["submission_drafts"]); err != nil {
+		return nil, fmt.Errorf("restore submission drafts: %w", err)
 	}
 	if err := restoreFindingTrafficTx(tx, snapshot); err != nil {
 		return nil, fmt.Errorf("restore finding traffic: %w", err)

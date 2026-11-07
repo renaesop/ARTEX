@@ -99,7 +99,7 @@ func TestWriteArchiveRowsProducesJSONSequence(t *testing.T) {
 }
 
 func TestTaskArchiveFormatCompatibility(t *testing.T) {
-	for _, version := range []int{1, 2, 3, TaskArchiveFormatVersion} {
+	for _, version := range []int{1, 2, 3, 4, TaskArchiveFormatVersion} {
 		if !IsTaskArchiveFormatSupported(version) {
 			t.Fatalf("archive format %d should be supported", version)
 		}
@@ -197,7 +197,16 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.AddFinding(task.ID, nodeID, vulnclass, "archive finding", SeverityCritical, "summary", "evidence", "worker", []int64{assetID}); err != nil {
+	findingID, err := d.AddFinding(task.ID, nodeID, vulnclass, "archive finding", SeverityCritical, "summary", "evidence", "worker", []int64{assetID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	disclosureID := fmt.Sprintf("archive-draft-%d", task.ID)
+	if _, err := d.Exec(`INSERT INTO submission_profiles (id,payload) VALUES ($1,'{}')`, disclosureID); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Exec(`DELETE FROM submission_profiles WHERE id=$1`, disclosureID)
+	if _, err := d.Exec(`INSERT INTO submission_drafts (id,finding_id,profile_id,payload) VALUES ($1,$2,$1,'{"body":"original"}')`, disclosureID, findingID); err != nil {
 		t.Fatal(err)
 	}
 	archive, err := d.QueueTaskArchive(task.ID)
@@ -221,6 +230,17 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	}
 	if snapshot.DataCounts["assets"] != 1 || snapshot.DataCounts["exploration_nodes"] < 2 {
 		t.Fatalf("unexpected snapshot counts: %#v", snapshot.DataCounts)
+	}
+	if _, err := d.Exec(`UPDATE submission_drafts SET revision=2,payload='{"body":"edited"}' WHERE id=$1`, disclosureID); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CompleteTaskArchive(archive.ID, snapshot, "/tmp/stale.tar.zst", "abc", 100, 50); err == nil || !strings.Contains(err.Error(), "drafts changed") {
+		t.Fatalf("archived over an edit: %v", err)
+	}
+	llmRecords.Reset()
+	snapshot, err = d.SnapshotTaskArchiveWithLLMRecords(task.ID, &llmRecords)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if err := d.CompleteTaskArchive(archive.ID, snapshot, "/tmp/test-task.tar.zst", "abc", 100, 50); err != nil {
 		t.Fatal(err)
@@ -269,6 +289,10 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	)
 	if err != nil {
 		t.Fatal(err)
+	}
+	var restoredDraft string
+	if err := d.QueryRow(`SELECT payload->>'body' FROM submission_drafts WHERE id=$1 AND revision=2 AND finding_id=$2`, disclosureID, findingID).Scan(&restoredDraft); err != nil || restoredDraft != "edited" {
+		t.Fatalf("restored disclosure draft %q: %v", restoredDraft, err)
 	}
 	var notice bool
 	if err := d.QueryRow(`SELECT EXISTS(SELECT 1 FROM activity WHERE exploration_id=$1 AND position($2 IN detail)>0)`, task.ExplorationID, linkWarning).Scan(&notice); err != nil || !notice {
