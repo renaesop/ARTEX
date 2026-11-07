@@ -506,3 +506,9 @@ Users must comply with all laws and regulations of their country/region regardin
 ### Disclaimer
 
 This project is provided "as is", without any express or implied warranty. The authors and contributors are not liable for any direct or indirect loss, data loss, system damage, or legal disputes caused by the use of this tool (whether used properly or not). **Downloading, installing, or using this project means you have read, understood, and agreed to all of the above terms.**
+
+### Session-pinned browsing exits
+
+Set `ARTEX_BROWSE_EXITS` to a comma-separated list of named loopback HTTP forwarders, for example `west=http://127.0.0.1:19209,east=http://127.0.0.1:19205`. Each forwarder must already have a fixed network exit. A chat conversation or task agent session selects one by stable hashing. Keep the configured set and names stable. With this setting omitted, existing networking behavior is used.
+
+WebFetch and the built-in stdio Playwright MCP accept `purpose=browse` for ordinary browsing and `purpose=security` for security testing. Browsing failures do not trigger a direct retry. To render JavaScript in WebFetch even with the MCP disabled, configure the absolute installed Playwright module path in `ARTEX_BROWSE_PLAYWRIGHT` and optionally its browser executable in `ARTEX_BROWSE_CHROMIUM`, then pass `render=true`. Shell tools retain the testing route and receive `ARTEX_BROWSE_PROXY` for explicit ordinary downloads. Model providers use their own profile transport.
