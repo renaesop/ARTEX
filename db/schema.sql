@@ -1133,6 +1133,23 @@ CREATE INDEX IF NOT EXISTS idx_findings_status ON findings(status, created_at DE
 -- The "by asset" view looks findings up via asset_ids @> '[<id>]'; without this GIN index that is a full table scan.
 CREATE INDEX IF NOT EXISTS idx_findings_asset_ids ON findings USING GIN(asset_ids jsonb_path_ops);
 
+-- Disclosure preparation is independent of task workspaces and cold archives.
+CREATE TABLE IF NOT EXISTS submission_profiles (
+    id TEXT PRIMARY KEY,
+    revision BIGINT NOT NULL DEFAULT 1,
+    payload JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS submission_drafts (
+    id TEXT PRIMARY KEY,
+    finding_id BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    profile_id TEXT NOT NULL REFERENCES submission_profiles(id),
+    revision BIGINT NOT NULL DEFAULT 1,
+    payload JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(finding_id, profile_id)
+);
+
 -- Manual retests are independent sessions; the verdict is stored separately from the original finding's disposition status.
 CREATE TABLE IF NOT EXISTS finding_retests (
     id BIGSERIAL PRIMARY KEY,
@@ -1482,4 +1499,12 @@ CREATE TABLE IF NOT EXISTS rsi_lesson_usage (
     mode      TEXT NOT NULL CHECK (mode IN ('shadow','inject')),
     shown_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (lesson_id, task_id, mode)
+);
+
+-- Per-device mobile credentials: opaque random secret, SHA-256 verifier only.
+CREATE TABLE IF NOT EXISTS mobile_tokens (
+ id text PRIMARY KEY, name text NOT NULL, token_hash bytea NOT NULL UNIQUE,
+ password_version text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
+ expires_at timestamptz NOT NULL, last_used_at timestamptz, revoked_at timestamptz,
+ CHECK (octet_length(token_hash) = 32)
 );

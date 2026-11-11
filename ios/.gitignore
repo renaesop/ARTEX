@@ -1,0 +1,27 @@
+.build/
+build/
+*.xcuserstate
+xcuserdata/
+*.ipa
+*.xcarchive
+*.xcresult
+.DS_Store
+*.mobileprovision
+*.p12
+*.key
+
+__pycache__/
+*.pyc
+
+# Device-specific signing and one-use credentials
+DerivedData/
+*.p8
+*.pfx
+*.pem
+*.cer
+*.xcconfig
+*.env
+.env*
+ARTEXDeviceEnrollment.json
+ARTEXEnrollmentReceipt.json
+*enrollment-receipt*.json

@@ -147,6 +147,11 @@ function FindingDetailInner() {
           <Separator orientation="vertical" className="mx-1 h-4" />
           <StatusBadge domain="severity" value={finding.severity} dot />
           <StatusBadge domain="finding" value={finding.status} dot />
+          <Button asChild size="sm" variant="outline" className="ml-auto">
+            <Link href={`/function/findings/submit?ids=${encodeURIComponent(finding.finding_id || finding.id)}`}>
+              提交预览
+            </Link>
+          </Button>
           {finding.inherited && finding.source_task_id && (
             <Badge variant="outline">Source task #{finding.source_task_id} · read-only</Badge>
           )}

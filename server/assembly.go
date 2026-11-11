@@ -103,10 +103,18 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 					continue
 				}
 				_ = pg.UpdateMCPHealth(m.ID, true, "")
+				var browse *browsingBrowser
+				if exit := agent.SessionBrowseExit(ctx, agentKey); exit != nil && m.Name == browserMCPName && m.Transport == "stdio" {
+					browse = &browsingBrowser{config: *m, exit: exit}
+					closers = append(closers, browse)
+				}
 				for _, t := range ts {
 					// MCP tools return target-influenced content (browser pages, remote
 					// analyses). Flag it in the description (cached prompt + on-demand
 					// schema) so the model treats their output as data, not instructions.
+					if browse != nil {
+						t = agent.PurposeTool(t, browse.call(t.Name()))
+					}
 					extra = append(extra, agent.DecorateTool(t, t.Description()+mcpUntrustedNote, nil))
 					allNames = append(allNames, t.Name())
 					serverTools[m.Name] = append(serverTools[m.Name], t.Name())
