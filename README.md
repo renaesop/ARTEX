@@ -11,6 +11,13 @@ AI autonomous penetration testing system (Go backend + Next.js frontend)
 
 ---
 
+## iOS client
+
+The native SwiftUI client is in [`ios/`](ios/README.md) (iOS 26+, Xcode 26.3+).
+It supports multiple HTTPS instances, tasks, sessions, findings and per-device
+credentials stored in Keychain. Add your server on first launch; private network
+addresses, signing identities and runtime credentials are not bundled.
+
 ## Screenshots
 
 
