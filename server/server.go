@@ -658,6 +658,7 @@ func (s *Server) chatAgentRef() *agent.ChatAgent {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerSideRoutes(mux)
+	s.registerMobileTokenRoutes(mux)
 
 	// Auth routes — exempt from JWT check (handled in requireAuth)
 	mux.HandleFunc("GET /api/auth/status", s.authStatus)
@@ -963,7 +964,7 @@ func (s *Server) Handler() http.Handler {
 // --- handlers ---
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]any{"ok": true, "service": "artex", "version": BuildVersion})
+	writeJSON(w, 200, map[string]any{"ok": true, "service": "artex", "version": BuildVersion, "capabilities": map[string]bool{"mobile_tokens_v1": true}})
 }
 
 func (s *Server) stats(w http.ResponseWriter, r *http.Request) {

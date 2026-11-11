@@ -1500,3 +1500,11 @@ CREATE TABLE IF NOT EXISTS rsi_lesson_usage (
     shown_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (lesson_id, task_id, mode)
 );
+
+-- Per-device mobile credentials: opaque random secret, SHA-256 verifier only.
+CREATE TABLE IF NOT EXISTS mobile_tokens (
+ id text PRIMARY KEY, name text NOT NULL, token_hash bytea NOT NULL UNIQUE,
+ password_version text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
+ expires_at timestamptz NOT NULL, last_used_at timestamptz, revoked_at timestamptz,
+ CHECK (octet_length(token_hash) = 32)
+);

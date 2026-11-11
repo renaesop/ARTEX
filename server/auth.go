@@ -120,6 +120,10 @@ func extractToken(r *http.Request) string {
 func (s *Server) requireAuth(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
+		if token := extractToken(r); strings.HasPrefix(token, mobileTokenPrefix) {
+			s.requireMobileToken(w, r, h, token)
+			return
+		}
 		if strings.HasPrefix(p, "/api/auth/") || p == "/api/health" {
 			h.ServeHTTP(w, r)
 			return
