@@ -65,22 +65,25 @@ func jsonbClean(b []byte) []byte {
 
 // Node is a typed reasoning node (= old task_nodes). kind ∈ goal|intent|finding|hint.
 type Node struct {
-	FindingID     int64           `json:"finding_id,omitempty"` // populated by finding-aware reads; never inferred from ID
-	FindingNodeID int64           `json:"finding_node_id,omitempty"`
-	TrafficCount  int             `json:"traffic_count,omitempty"`
-	ID            int64           `json:"id"`
-	Kind          string          `json:"kind"`
-	Payload       json.RawMessage `json:"payload"`
-	Priority      int             `json:"priority"`
-	State         string          `json:"state"`
-	Origin        string          `json:"origin,omitempty"`
-	Owner         string          `json:"owner,omitempty"`
-	BlockedReason string          `json:"blocked_reason,omitempty"`
-	DeleteReason  string          `json:"delete_reason,omitempty"` // non-empty only when an intent is soft-deleted (state='deleted')
-	Anchors       []int64         `json:"anchors,omitempty"`
-	CreatedAt     time.Time       `json:"created_at"`
-	SourceTaskID  int64           `json:"source_task_id,omitempty"`
-	Inherited     bool            `json:"inherited,omitempty"`
+	FindingStatus        string          `json:"finding_status,omitempty"`
+	LatestRetest         json.RawMessage `json:"latest_retest,omitempty"`
+	FindingLifecycleNote string          `json:"finding_lifecycle_note,omitempty"`
+	FindingID            int64           `json:"finding_id,omitempty"` // populated by finding-aware reads; never inferred from ID
+	FindingNodeID        int64           `json:"finding_node_id,omitempty"`
+	TrafficCount         int             `json:"traffic_count,omitempty"`
+	ID                   int64           `json:"id"`
+	Kind                 string          `json:"kind"`
+	Payload              json.RawMessage `json:"payload"`
+	Priority             int             `json:"priority"`
+	State                string          `json:"state"`
+	Origin               string          `json:"origin,omitempty"`
+	Owner                string          `json:"owner,omitempty"`
+	BlockedReason        string          `json:"blocked_reason,omitempty"`
+	DeleteReason         string          `json:"delete_reason,omitempty"` // non-empty only when an intent is soft-deleted (state='deleted')
+	Anchors              []int64         `json:"anchors,omitempty"`
+	CreatedAt            time.Time       `json:"created_at"`
+	SourceTaskID         int64           `json:"source_task_id,omitempty"`
+	Inherited            bool            `json:"inherited,omitempty"`
 }
 
 // Activity is one worker execution step (= old task_activity).

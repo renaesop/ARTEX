@@ -321,6 +321,8 @@ tested AS (
   FROM exploration_anchors ea
   JOIN exploration_nodes en ON en.id = ea.node_id
   WHERE en.exploration_id = $2 AND en.kind = 'fact'
+    AND en.state='confirmed'
+    AND COALESCE(en.payload->>'outcome', 'legacy') IN ('legacy','verified','negative')
 )`
 
 // TaskCoverage computes rough per-type coverage for a task. taskID indexes

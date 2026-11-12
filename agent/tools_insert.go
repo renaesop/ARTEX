@@ -533,6 +533,7 @@ func (t *ToolSet) listUntestedAssets() actool.CoreTool {
 			}
 			return jsonResult(map[string]any{
 				"assets": assets, "total": total, "page": a.Page, "page_size": a.PageSize,
+				"coverage_note": coverageCaveat,
 			})
 		},
 	)

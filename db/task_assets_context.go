@@ -50,6 +50,8 @@ tested AS (
   FROM exploration_anchors ea
   JOIN exploration_nodes en ON en.id=ea.node_id AND en.kind='fact'
   JOIN context_tasks ctx ON ctx.exploration_id=en.exploration_id
+  WHERE en.state='confirmed'
+    AND COALESCE(en.payload->>'outcome', 'legacy') IN ('legacy','verified','negative')
 )`
 
 // scopeTargetCTE selects every asset that BELONGS to the current task's (and its

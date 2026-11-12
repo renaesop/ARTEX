@@ -14,6 +14,7 @@ import (
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/plannerreview"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -91,8 +92,9 @@ func retryableWorkerModelError(reason harness.TerminalReason, err error) bool {
 // (re)installed at runtime (LLM configured from the UI); the loops always run
 // but idle until an LLM is set.
 type Engine struct {
-	m        *Manager
-	debounce time.Duration
+	reviewClientForTest func(string) *plannerreview.Client
+	m                   *Manager
+	debounce            time.Duration
 
 	bc *Broadcaster // live activity pub/sub (SSE)
 
@@ -898,6 +900,10 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		if ectx.Err() != nil || e.IsDeleting(t.ID) {
 			return
 		}
+		if e.skipReviewedIdle(ectx, t) {
+			t.drainTriggers()
+			return
+		}
 		log.Printf("[planner] task %s planning… (trigger: %s)", t.ID, src)
 		// round marker: each Plan() is one planner round; emit a boundary so the
 		// UI can separate rounds in the transcript (kind='round').
@@ -908,8 +914,10 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		triggers := t.drainTriggers()
 		taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
 		e.BeginLLMCall(t.ID)
-		met, reason, err := planner.Plan(ectx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, emit)
+		round, err := planner.PlanRound(ectx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, emit)
 		e.EndLLMCall(t.ID)
+		met, reason := round.GoalMet, round.GoalReason
+		e.finishPlannerRound(ectx, t, round, err)
 		switch {
 		case err != nil && ectx.Err() == nil:
 			log.Printf("[planner] task %s planning error: %v", t.ID, err)

@@ -44,6 +44,7 @@ func constraintBlock(ts *db.ExplorationStore) string {
 		b.WriteString("\nForbidden operations:\n")
 		b.WriteString(strings.Join(deny, "\n"))
 	}
+	b.WriteString("\nA restriction applies to the destination and operation, not just its URL spelling. Never evade it using aliases/CNAMEs, origin IPs, Host/SNI overrides, redirects, proxies/SSRF, alternative ports, tools, or entry points. A platform denial is not a target defense to bypass. If destination scope cannot be established, stop that action and report the uncertainty; discovery is not authorization.")
 	b.WriteString("\n(Discovering a new target/port/host outside the constraints does not grant authorization: unless it falls within the allowed range above, record it as an out-of-scope fact and skip it — do not spawn intents or execute actions for it.)")
 	return b.String()
 }

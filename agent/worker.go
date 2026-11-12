@@ -440,8 +440,11 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// The run-wide intent is not the current tool action. Do not forward it or
 	// inherit a parent run's background into the action reviewer.
 	ctx = intercept.WithReviewContext(ctx, runDir, intercept.ReviewBackground{})
+	if ts != nil {
+		ctx = intercept.WithTaskConstraints(ctx, ts.ListConstraints)
+	}
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
-	sysBody := workerSystem(w.proxyAddr, w.proxyCACert, w.workDir, runDir) + w.lessonsBlock
+	sysBody := workerSystem(w.proxyAddr, w.proxyCACert, w.workDir, runDir) + w.lessonsBlock + progressContract
 	if w.wantConstraints() {
 		sysBody += constraintBlock(ts) // inject the operation constraints (if any) into the system prompt; the worker strictly obeys them during execution
 	}
@@ -555,6 +558,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// Experimental: when on, noa takes over context compression (archives persist under <workDir>/noa/<SessionID>).
 	noaSession := WorkerSessionID(ts.ID(), intent.ID)
 	enableNoa(&opts, w.noaEnabledFn, w.workDir, noaSession, noaWarn(noaSession))
+	ctx, progress := newRunProgress(ctx, opts.Hooks, maxDur)
+	defer progress.Close()
+	opts.Hooks = progress
 	ctx = attachSideCapture(ctx, &opts)
 	s := agentcore.NewSession(opts)
 	defer s.Close() // release the session's background-task manager (temp dir + processes)
@@ -590,8 +596,11 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// on hit it runs a wrap-up turn and finishes with ReasonMaxTurns/ReasonTimeout.
 	// MaxDuration now interrupts an in-flight tool at the wall-clock deadline and
 	// enters the wrap-up phase on the live ctx, so a run whose tool overran the budget
-	// still settles (no external hard-timeout backstop needed). ctx itself carries only
+	// still settles. runProgress additionally bounds settlement calls and time. ctx carries
 	// pause / planner kill / shutdown, which the engine distinguishes and re-queues/stops.
 	_, reason, err := captureRunSession(ctx, s, input, emitWrap)
+	if progress.Err() != nil {
+		err = progress.Err()
+	}
 	return reason, tsx.Writes(), err
 }

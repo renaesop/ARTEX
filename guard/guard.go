@@ -1,8 +1,8 @@
 // Package guard implements the safety boundary layer (docs §11): an audit log,
 // user-configured intercept-rule evaluation, and Observer/G5 failure attribution.
 // Every tool call passes through the PreToolUse hook before executing.
-// (The RoE authorization-scope mechanism was removed; a replacement may be added
-// later.) Destructive/exfil gating is no longer hard-coded here — it lives in the
+// Task constraints, when bound by the application, are reviewed before optional
+// intercept rules. Destructive/exfil gating is not hard-coded here — it lives in the
 // DB intercept rules (seeded as ordinary [built-in] rules, so users can disable or
 // delete them), evaluated via applyIntercept.
 package guard
@@ -74,6 +74,13 @@ func (g *Guard) preToolUse(ctx context.Context, ev hook.Event) hook.Result {
 		_ = json.Unmarshal(ev.Input, &in)
 		cmd = in.Text
 	}
+	ctx = intercept.WithCall(ctx, ev.ToolName, ev.Input)
+	if dec, checked := g.interceptor.CheckTaskScope(ctx, ev.ToolName, ev.Input); checked && dec.Action != "allow" {
+		if g.interceptor != nil {
+			g.interceptor.Log(ctx, intercept.ConvIDFromContext(ctx), dec, ev.ToolName, ev.Input, "denied")
+		}
+		return g.block(ev.ToolName, systemBlockMessage(dec.Message), cmd)
+	}
 	g.record(ev.ToolName, "allow", "", cmd)
 	return g.applyIntercept(ctx, ev)
 }
@@ -87,7 +94,6 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 	if !g.interceptor.IsToolEnabled(ev.ToolName) {
 		return hook.Result{}
 	}
-	ctx = intercept.WithCall(ctx, ev.ToolName, ev.Input)
 	dec, matched := g.interceptor.Match(ev.ToolName, ev.Input)
 	if !matched {
 		// No rule matched. Ask the LLM fallback judge (if enabled); when it is off
@@ -137,7 +143,7 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 // model-facing tool_result carries this framing.
 func systemBlockMessage(reason string) string {
 	return "[ARTEX platform control, not target defense] This call was intercepted by the platform. " +
-		"Reason: " + reason + ". This operation is forbidden."
+		"Reason: " + reason + ". This operation is forbidden. Do not retry the same destination or operation through an alias, origin IP, Host/SNI override, redirect, proxy, alternative entry point, tool, or encoding. Record the blocked action and continue only within the authorized scope."
 }
 
 var reBlocked = regexp.MustCompile(`(?i)\b(403|forbidden|waf|blocked|rate.?limit|429|captcha|denied)\b`)

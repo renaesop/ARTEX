@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/plannerreview"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
@@ -21,6 +23,7 @@ import (
 // assets, judges whether the task goal is met, and emits 0..N exploration intents
 // into the frontier. It is the sole intent generator.
 type Planner struct {
+	runTimeout        time.Duration
 	findingRecorder   FindingRecorder
 	prov              llm.Provider
 	model             string
@@ -54,6 +57,8 @@ type Planner struct {
 func NewPlanner(prov llm.Provider, model, workDir string, tx *transcript.Store, window, maxTurns int) *Planner {
 	return &Planner{prov: prov, model: model, workDir: workDir, tx: tx, window: window, maxTurns: maxTurns, todos: map[int64]*actool.TodoStore{}}
 }
+
+func (p *Planner) SetRunTimeout(run time.Duration) { p.runTimeout = run }
 
 func (p *Planner) SetCompactionWindowResolver(fn func() int) { p.windowFn = fn }
 
@@ -365,7 +370,8 @@ func plannerSystem(goal, dataDir, workDir string) string {
 // and/or finding(s) reported (may be several — the engine debounces a burst; empty
 // for time/heartbeat wakes). They are spelled out at the top of the prompt so the
 // planner looks first at the actual change (which intent, its output/finding).
-func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, goal string, triggers []TriggerEvent, emit func(db.Activity)) (met bool, reason string, err error) {
+func (p *Planner) PlanRound(ctx context.Context, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, goal string, triggers []TriggerEvent, emit func(db.Activity)) (result plannerreview.Round, err error) {
+	result.StartedAt = time.Now().UTC()
 	// cold-digest §2.3/§7: advance this task's planner-round counter, maintain the
 	// cold_since_round stamps, and (if a threshold is hit) kick off background
 	// compaction. Synchronous part is cheap (a few queries); the LLM compaction
@@ -386,6 +392,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// Domain tools + the basic default tool set (Read/Write/Edit/MultiEdit/LS/Glob/Grep/Bash).
 	// When the asset-coverage feature is off, drop add_task_scope/list_untested_assets (not in the prompt).
 	base := append(tsx.DropCoverageTools(tsx.PlannerTools()), actool.DefaultTools()...)
+	base = append(base, tsx.finishPlanning())
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
 	tools, def, cleanup := AugmentTools(ctx, "planner", base)
 	defer cleanup()
@@ -407,15 +414,18 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// This task's work dir <workDir>/tasks/<taskID>; create it first.
 	taskDir := ensureRunDir(p.workDir, taskID, 0)
 	ctx = intercept.WithReviewContext(ctx, taskDir, intercept.ReviewBackground{})
-	sysBody := plannerSystem(goal, p.workDir, taskDir) + p.lessonsBlock
+	if ts != nil {
+		ctx = intercept.WithTaskConstraints(ctx, ts.ListConstraints)
+	}
+	sysBody := plannerSystem(goal, p.workDir, taskDir) + p.lessonsBlock + progressContract
 	if p.wantConstraints() {
 		sysBody += constraintBlock(ts) // inject the operation constraints (if any) into the system prompt, bounding exploration
 	}
 	system, boundary := deferredSystem(sysBody, def)
-	// The planner has no wall-clock budget of its own; when a deadline exists, clamp
+	// Apply the configured per-round budget; when a task deadline exists, clamp
 	// MaxDuration to the remainder so a running planning round enters wrap-up when the
 	// task hits its deadline (timeout → task-timeout prompt; turns → per-run prompt).
-	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, 0)
+	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, p.runTimeout)
 	settle := wrapupSettlement("planner", nil)
 	if tc.DeadlineUnix > 0 {
 		settle = wrapupSettlementForTask("planner", nil, clamped)
@@ -477,26 +487,27 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	lead := "There were concrete changes just now (see [The actual changes that triggered this round] below); plan the next steps accordingly:"
 	if len(triggers) == 0 {
 		lead = "This round is a **scheduled patrol (heartbeat) / no concrete change signal** wake-up — the graph may not have anything new. Review running intents in passing: steer_work the long-stalled or off-track ones to correct course, kill_work the ones whose whole direction is wrong to cut losses; then judge the goals and decide whether to add directions:"
-		// On a heartbeat/no-change wake-up, if the whole graph has no open or running
-		// intent at all → exploration has stalled (no worker running, no queued
-		// direction). Tell the planner explicitly and force it to add new directions
-		// this round, rather than spinning a round after only reviewing running intents.
-		if active, err := ts.HasActiveIntent(); err == nil && !active {
-			lead = "This round is a **scheduled patrol (heartbeat)** wake-up, and there are currently **no open or running intents at all** — no worker is running and no direction is queued; exploration has stalled. You **must** produce one or more new intents this round that advance toward the goal and **don't duplicate** existing ones (producing 0 intents is not allowed); first judge from the situation below whether the goal is met, and if not, add directions immediately:"
-		}
 	}
-	input := lead + situational + "\n\nJudge the goals from the situation above. When a goal is [truly met] (the goal's deliverable obtained / the goal's vulnerability confirmed), mark each with prove_goal. **Hard floor: as long as the goal is unmet and there are currently no open or running intents (frontier_open=0 and running_intents is empty), this round must produce at least one intent advancing toward the goal — at that point there is no running work to wait for and no queued direction, so producing 0 intents = the task stalls. Only when open/running intents are already advancing, or the goal is met, may this round produce no new intents.**" +
-		renderPlannerTodos(opts.Todos.List())
-	// MaxDuration now interrupts an in-flight tool at the wall-clock deadline and
-	// enters wrap-up in place (on the live ctx), so a stuck single round no longer
-	// bypasses wrap-up — no external hard-ctx backstop needed. ctx carries only
-	// pause / kill / shutdown.
-	_, _, err = captureRun(ctx, opts, input,
+
+	input := lead + situational + "\n\nJudge the goals using current evidence. Only prove_goal when supported. If the goal is unmet and a concrete authorized next step is executable and not already assigned, dispatch it. Zero new intents is appropriate when existing work covers the next steps, the goal is met, or all remaining known directions have evidenced unmet prerequisites. If no work is active and you dispatch nothing, state the prior evidence, specific blocker and event needed to resume; lack of an immediate idea is not proof of blockage. Budget exhaustion alone is not a blocker: continue unfinished steps from the saved checkpoint without repeating completed work. Reopening a previously blocked or negative direction requires new evidence satisfying its revisit condition." + renderPlannerTodos(opts.Todos.List())
+	ctx, progress := newRunProgress(ctx, opts.Hooks, maxDur)
+	defer progress.Close()
+	opts.Hooks = progress
+
+	input += "\nIf you create zero intents this round, call finish_planning before ending. Record the reason, existing evidence IDs and a concrete resume condition. This only records the decision; it does not mark goals met."
+	finalText, terminal, err := captureRun(ctx, opts, input,
 		func(r db.Activity) {
 			if emit != nil {
 				r.Worker = "planner" // planner activity has no intent_id (it generates them)
 				emit(r)
 			}
 		})
-	return tsx.GoalMet, tsx.Reason, err
+	if progress.Err() != nil {
+		err = progress.Err()
+	}
+	result.GoalMet, result.GoalReason = tsx.GoalMet, tsx.Reason
+	result.FinalText, result.TerminalReason = finalText, string(terminal)
+	result.CreatedIntentIDs, result.Zero = tsx.plannerOutcome()
+	result.EndedAt = time.Now().UTC()
+	return result, err
 }

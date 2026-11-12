@@ -1508,3 +1508,30 @@ CREATE TABLE IF NOT EXISTS mobile_tokens (
  expires_at timestamptz NOT NULL, last_used_at timestamptz, revoked_at timestamptz,
  CHECK (octet_length(token_hash) = 32)
 );
+
+-- Online zero-intent review is separate from goals and intent execution.
+CREATE TABLE IF NOT EXISTS planner_round_results (
+ id BIGSERIAL PRIMARY KEY,
+ task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+ result JSONB NOT NULL,
+ failed BOOLEAN NOT NULL DEFAULT false,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_planner_round_task ON planner_round_results(task_id,id DESC);
+CREATE TABLE IF NOT EXISTS planner_review_runs (
+ id BIGSERIAL PRIMARY KEY,
+ task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+ round_id BIGINT NOT NULL REFERENCES planner_round_results(id) ON DELETE CASCADE,
+ fingerprint TEXT NOT NULL,
+ policy TEXT NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('running','waiting_evidence','waiting_event','needs_attention','refused','unavailable','canceled','stale','interrupted')),
+ attempts JSONB NOT NULL DEFAULT '[]',
+ result JSONB,
+ lease_until TIMESTAMPTZ NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ finished_at TIMESTAMPTZ,
+ UNIQUE(task_id,fingerprint,policy)
+);
+ALTER TABLE planner_review_runs ADD COLUMN IF NOT EXISTS next_check_at TIMESTAMPTZ;
+ALTER TABLE planner_review_runs ADD COLUMN IF NOT EXISTS rechecks INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE planner_review_runs ADD COLUMN IF NOT EXISTS history JSONB NOT NULL DEFAULT '[]';

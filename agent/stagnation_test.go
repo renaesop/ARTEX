@@ -19,21 +19,32 @@ func TestDetectStagnation(t *testing.T) {
 		nodeWithSummary(35, "enumerate endpoints on https://target.example.com/api/v9"),
 		nodeWithSummary(40, "Review authentication flow for token replay"),
 	}
-	if got := detectStagnation(done, nil); len(got) != 1 {
+	if got := detectStagnation(done, nil, nil); len(got) != 1 {
 		t.Fatalf("expected 1 stagnating direction, got %d: %+v", len(got), got)
 	} else if got[0]["repeats"] != 3 {
 		t.Fatalf("repeats=%v want 3", got[0]["repeats"])
 	}
 
-	// a finding produced after the first repeat disarms the direction
+	// Only a finding linked to this direction disarms the warning.
 	findingPayload, _ := json.Marshal(map[string]any{"summary": "IDOR found"})
 	findings := []*db.Node{{ID: 25, Kind: db.KindFinding, Payload: findingPayload}}
-	if got := detectStagnation(done, findings); len(got) != 0 {
+	if got := detectStagnation(done, findings, map[int64]int64{25: 22}); len(got) != 0 {
 		t.Fatalf("expected no stagnation once a finding exists, got %+v", got)
 	}
 
+	if got := detectStagnation(done, findings, map[int64]int64{25: 40}); len(got) != 1 {
+		t.Fatal("unrelated finding hid stagnant direction")
+	}
+	if got := detectStagnation(done, findings, nil); len(got) != 1 {
+		t.Fatal("missing lineage treated as progress")
+	}
+	findings[0].FindingStatus = db.FindingFixed
+	if got := detectStagnation(done, findings, map[int64]int64{25: 22}); len(got) != 1 {
+		t.Fatal("fixed historical finding treated as current progress")
+	}
+
 	// below the repeat threshold: nothing
-	if got := detectStagnation(done[:2], nil); len(got) != 0 {
+	if got := detectStagnation(done[:2], nil, nil); len(got) != 0 {
 		t.Fatalf("expected no stagnation below threshold, got %+v", got)
 	}
 }

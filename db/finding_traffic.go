@@ -435,13 +435,18 @@ func (s *ExplorationStore) PopulateFindingTrafficIDs(nodes []*Node) error {
 			continue
 		}
 		byID[n.ID] = n
+		n.FindingStatus = "unknown"
+		n.LatestRetest = nil
+		n.FindingLifecycleNote = "Current triage unavailable. Historical node state and evidence do not establish current access."
 		args = append(args, n.ID)
 		placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)))
 	}
 	if len(args) == 0 {
 		return nil
 	}
-	rows, err := s.db.Query(`SELECT f.id,f.node_id,(SELECT count(*) FROM finding_traffic_bindings b WHERE b.finding_id=f.id) FROM findings f WHERE f.node_id IN (`+strings.Join(placeholders, ",")+`)`, args...)
+	rows, err := s.db.Query(`SELECT f.id,f.node_id,(SELECT count(*) FROM finding_traffic_bindings b WHERE b.finding_id=f.id),f.status,
+        COALESCE((SELECT jsonb_build_object('id',r.id,'status',r.status,'verdict',r.verdict,'summary',r.summary,'created_at',r.created_at,'finished_at',r.finished_at) FROM finding_retests r WHERE r.finding_id=f.id ORDER BY r.id DESC LIMIT 1),'null'::jsonb)
+        FROM findings f WHERE f.node_id IN (`+strings.Join(placeholders, ",")+`)`, args...)
 	if err != nil {
 		return err
 	}
@@ -449,11 +454,16 @@ func (s *ExplorationStore) PopulateFindingTrafficIDs(nodes []*Node) error {
 	for rows.Next() {
 		var findingID, nodeID int64
 		var count int
-		if err := rows.Scan(&findingID, &nodeID, &count); err != nil {
+		var status string
+		var retest []byte
+		if err := rows.Scan(&findingID, &nodeID, &count, &status, &retest); err != nil {
 			return err
 		}
 		n := byID[nodeID]
 		n.FindingID, n.FindingNodeID, n.TrafficCount = findingID, nodeID, count
+		n.FindingStatus = status
+		n.LatestRetest = json.RawMessage(retest)
+		n.FindingLifecycleNote = findingLifecycleNote(status)
 	}
 	return rows.Err()
 }
@@ -478,4 +488,15 @@ func (d *DB) SetFindingReportVersionByNodeID(ctx context.Context, nodeID int64, 
 		return err
 	})
 	return
+}
+
+// Triage and observations are separate: even a confirmed finding is not proof
+// that a historical capability still works at the time of a later action.
+func findingLifecycleNote(status string) string {
+	switch status {
+	case FindingFixed, FindingResolved, FindingFalsePositive:
+		return "Historical evidence only: current triage is " + status + ". Do not treat the old report, graph state, facts or digest as a currently usable capability. A historical reproduced retest does not override current triage; conflicting newer evidence requires explicit reconciliation."
+	default:
+		return "Current triage is " + status + ". Evidence and retests describe their observation times and tested scope only. Pending, failed, stopped or inconclusive retests prove neither fixed nor reproduced. Do not infer present access or silently extend proof to other hosts or dependencies."
+	}
 }

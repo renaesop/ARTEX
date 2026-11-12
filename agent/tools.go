@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/plannerreview"
 	acperm "github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 )
@@ -39,16 +42,17 @@ func normalizeDirection(summary string) string {
 
 // detectStagnation (ouroboros take, #99) flags directions whose normalized
 // summary repeats stagnationMinRepeats times among finished intents while no
-// finding has been produced since the FIRST attempt at that direction: the
+// current finding is linked to an attempt at that direction: the
 // planner is grinding the same shape of work without yield. Pure function over
-// (finished intents, findings) so it is unit-testable without a store.
+// (finished intents, findings, lineage) so it is unit-testable without a store.
 const stagnationMinRepeats = 3
 
-func detectStagnation(done, findings []*db.Node) []map[string]any {
+func detectStagnation(done, findings []*db.Node, intentOf map[int64]int64) []map[string]any {
 	type dir struct {
-		firstID  int64
-		repeats  int
-		summary  string
+		firstID int64
+		repeats int
+		summary string
+		intents map[int64]bool
 	}
 	dirs := map[string]*dir{}
 	order := []string{}
@@ -65,7 +69,7 @@ func detectStagnation(done, findings []*db.Node) []map[string]any {
 		}
 		d, ok := dirs[fp]
 		if !ok {
-			d = &dir{firstID: n.ID, summary: summ}
+			d = &dir{firstID: n.ID, summary: summ, intents: map[int64]bool{}}
 			dirs[fp] = d
 			order = append(order, fp)
 		}
@@ -74,6 +78,7 @@ func detectStagnation(done, findings []*db.Node) []map[string]any {
 			d.summary = summ
 		}
 		d.repeats++
+		d.intents[n.ID] = true
 	}
 	var out []map[string]any
 	for _, fp := range order {
@@ -83,7 +88,7 @@ func detectStagnation(done, findings []*db.Node) []map[string]any {
 		}
 		produced := false
 		for _, f := range findings {
-			if f.ID > d.firstID {
+			if d.intents[intentOf[f.ID]] && f.FindingStatus != db.FindingFixed && f.FindingStatus != db.FindingResolved && f.FindingStatus != db.FindingFalsePositive {
 				produced = true
 				break
 			}
@@ -137,6 +142,9 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 // ToolSet exposes the PG-backed dual graph (asset + exploration) to an LLM agent.
 // One ToolSet is created per planner/worker run; per-run signals live here.
 type ToolSet struct {
+	planMu          sync.Mutex
+	createdIntents  []int64
+	zeroDecision    *plannerreview.ZeroDecision
 	findingRecorder FindingRecorder
 	as              *db.AssetStore   // asset store (optional; nil = asset tools not available)
 	cs              *db.CompanyStore // company store (optional)
@@ -532,16 +540,23 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// negative results) so the planner sees them in one call; full content
 	// via node_detail(id).
 	vulnNodes, _ := t.ts.ListByKind(db.KindFinding, 1000)
+	out["findings_total"] = len(vulnNodes) // Historical registrations, not active vulnerabilities.
+	if err := t.ts.PopulateFindingTrafficIDs(vulnNodes); err != nil {
+		out["finding_lifecycle_error"] = "Current finding state unavailable; historical evidence must not be used as proof of current access."
+		vulnNodes = nil
+	}
+	out["finding_lifecycle_instruction"] = "Finding counts are historical registrations, not active vulnerability counts. Read finding_status and latest_retest before reusing any historical finding, fact, report or digest; old graph state does not establish current exploitability. Revalidation must remain within task constraints."
 	factNodes, _ := t.ts.ListByKind(db.KindFact, 1000) // newest first
-	out["findings_total"] = len(vulnNodes)             // total confirmed findings (goal judgment looks here); details in finding_list (latest window)
-	out["facts"] = len(factNodes)                      // number of exploration facts/conclusions (including negative conclusions)
+
+	out["facts"] = len(factNodes) // number of exploration facts/conclusions (including negative conclusions)
 	// Stagnation surfacing (#99): repeated finished directions with no findings
 	// since their first attempt. Self-describing payload — the instruction ships
 	// with the data so no prompt-template change is needed on deployed installs.
-	if stale := detectStagnation(recentDone, vulnNodes); len(stale) > 0 {
+	findingIntents, _ := t.ts.FindingIntents()
+	if stale := detectStagnation(recentDone, vulnNodes, findingIntents); len(stale) > 0 {
 		out["stagnation_warning"] = map[string]any{
-			"directions": stale,
-			"instruction": "these directions were dispatched repeatedly with zero findings produced since their first attempt — do NOT re-dispatch the same approach again; open a materially different direction, or judge the goal on the existing evidence instead of grinding",
+			"directions":  stale,
+			"instruction": "these directions were dispatched repeatedly without a current finding linked to them. Do not redispatch without new evidence changing the prerequisite; otherwise record the blocker and wait. Unrelated findings do not establish progress on these directions.",
 		}
 	}
 	// findings are the task's highest-value output → the overview carries the latest
@@ -557,9 +572,7 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		if len(findingList) >= findingListCap {
 			break
 		}
-		var fp map[string]any
-		_ = json.Unmarshal(n.Payload, &fp)
-		m := map[string]any{"id": n.ID, "summary": fp["summary"]}
+		m := compactFinding(n)
 		if from := factFrom[n.ID]; from > 0 {
 			m["from_intent"] = from // which intent produced this finding
 		}
@@ -638,6 +651,7 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 					m["denominator"] = cov.Denominator
 					m["tested"] = cov.Tested
 					m["by_type"] = cov.ByType
+					m["coverage_note"] = coverageCaveat
 					m["note"] = "coverage = asset test coverage (including endpoints and all kinds of related assets), a rough estimate for reference only: includes the current task's and directly related tasks' scopes and fact anchors; related scopes are read-only. Container-type assets/mass enumeration skew it low — don't take it as fully tested; use add_task_scope to extend this task's scope, list_untested_assets to see untested assets [usually no need to call list_untested_assets; just proceed with the task];"
 					if cov.Denominator == 0 {
 						m["pct"] = nil
@@ -842,6 +856,10 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 
 		facts, _ := ts.ListByKind(db.KindFact, relatedOverviewMaxFactsPerSource)
 		findings, _ := ts.ListByKind(db.KindFinding, relatedOverviewMaxFindingsPerTask)
+		if err := ts.PopulateFindingTrafficIDs(findings); err != nil {
+			item["finding_lifecycle_error"] = "Current source finding state unavailable; do not reuse historical capabilities."
+			findings = nil
+		}
 		intentNodes, _ := ts.ListByKind(db.KindIntent, 300)
 		terminalIntent := make(map[int64]bool, len(intentNodes))
 		for _, intent := range intentNodes {
@@ -994,6 +1012,16 @@ func compactNode(n *db.Node) map[string]any {
 	var p map[string]any
 	_ = json.Unmarshal(n.Payload, &p)
 	m := map[string]any{"id": n.ID, "state": n.State, "summary": p["summary"]}
+	if n.Kind == db.KindFact {
+		for _, key := range []string{"outcome", "test_dimension", "tested_asset_ids", "revisit_condition", "checkpoint", "supersedes"} {
+			if v, ok := p[key]; ok {
+				m[key] = v
+			}
+		}
+		if _, ok := p["outcome"]; !ok {
+			m["coverage_note"] = "Coverage is incomplete/legacy; this summary is not proof that the asset is untested, fully tested, or currently accessible."
+		}
+	}
 	if n.Inherited {
 		inheritedMap(m, n.SourceTaskID)
 	}
@@ -1004,7 +1032,9 @@ func compactNode(n *db.Node) map[string]any {
 func compactFinding(n *db.Node) map[string]any {
 	var p map[string]any
 	_ = json.Unmarshal(n.Payload, &p)
-	m := map[string]any{"id": n.ID, "state": n.State, "summary": p["summary"]}
+	m := map[string]any{"id": n.ID, "state": n.State, "summary": p["summary"],
+		"finding_status": n.FindingStatus, "latest_retest": n.LatestRetest,
+		"finding_lifecycle_note": n.FindingLifecycleNote}
 	if n.Inherited {
 		inheritedMap(m, n.SourceTaskID)
 	}
@@ -1170,6 +1200,8 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 		priority = 5
 	}
 	anchors := pidList(it.AssetIDs)
+	slices.Sort(anchors)
+	anchors = slices.Compact(anchors)
 	// Asset interception: if the assets bound to an intent hit the system's asset
 	// interception rules, the intent is forbidden from being dispatched.
 	if t.as != nil && len(anchors) > 0 {
@@ -1194,6 +1226,9 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	t.planMu.Lock()
+	t.createdIntents = append(t.createdIntents, id)
+	t.planMu.Unlock()
 	// upstream lineage: link each (validated) fact/finding parent → this intent, so
 	// "multiple facts combine into one new intent" is expressible.
 	for _, parent := range parents {
@@ -1431,20 +1466,30 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 // must NOT be stuffed into the asset graph via upsert_asset.
 // factItem is one fact of a record_fact batch/single call.
 type factItem struct {
-	Summary    string            `json:"summary"`
-	Detail     string            `json:"detail"`
-	Evidence   string            `json:"evidence"`   // one line of key evidence (command + key output lines) supporting the conclusion, for later verification
-	Confidence string            `json:"confidence"` // observed (seen directly) | inferred (inferred from phenomena)
-	IntentID   json.RawMessage   `json:"intent_id"`
-	AssetIDs   []json.RawMessage `json:"asset_ids"`
+	Supersedes       int64             `json:"supersedes"`
+	Outcome          string            `json:"outcome"`
+	TestDimension    string            `json:"test_dimension"`
+	RevisitCondition string            `json:"revisit_condition"`
+	Checkpoint       string            `json:"checkpoint"`
+	Summary          string            `json:"summary"`
+	Detail           string            `json:"detail"`
+	Evidence         string            `json:"evidence"`   // one line of key evidence (command + key output lines) supporting the conclusion, for later verification
+	Confidence       string            `json:"confidence"` // observed (seen directly) | inferred (inferred from phenomena)
+	IntentID         json.RawMessage   `json:"intent_id"`
+	AssetIDs         []json.RawMessage `json:"asset_ids"`
 }
 
 // recordOneFact writes one fact node and links it to the intent (intent→yields→fact).
 // defaultIntent is the default intent for batch mode (used when this item gives no
 // intent_id).
 func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error) {
+	id, _, err := t.recordFactItem(context.Background(), it, defaultIntent)
+	return id, err
+}
+
+func (t *ToolSet) recordFactItem(ctx context.Context, it factItem, defaultIntent int64) (int64, bool, error) {
 	if strings.TrimSpace(it.Summary) == "" {
-		return 0, fmt.Errorf("summary must not be empty")
+		return 0, false, fmt.Errorf("summary must not be empty")
 	}
 	payload := map[string]any{"summary": it.Summary}
 	if it.Detail != "" {
@@ -1459,23 +1504,46 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error)
 	intent := pid(it.IntentID)
 	if intent <= 0 {
 		intent = defaultIntent
+		if intent <= 0 && t.ownerNode > 0 {
+			if n, err := t.ts.GetNode(t.ownerNode); err == nil && n != nil && n.Kind == db.KindIntent {
+				intent = t.ownerNode
+			}
+		}
 	}
 	if intent > 0 {
 		node, err := t.ts.GetNode(intent)
 		if err != nil || node == nil || node.Kind != db.KindIntent {
-			return 0, fmt.Errorf("intent_id must be an intent of this task (related-task intents are read-only)")
+			return 0, false, fmt.Errorf("intent_id must be an intent of this task (related-task intents are read-only)")
 		}
 	}
-	// a fact is its OWN node kind (distinct from a vuln finding).
-	id, err := t.ts.AddNode(db.KindFact, payload, 5, "confirmed", t.worker, pidList(it.AssetIDs))
-	if err != nil {
-		return 0, err
+	anchors := pidList(it.AssetIDs)
+	slices.Sort(anchors)
+	anchors = slices.Compact(anchors)
+	if it.Supersedes > 0 {
+		payload["supersedes"] = it.Supersedes
 	}
-	if intent > 0 {
-		_ = t.ts.Link(intent, db.RelYields, id) // chain: intent -> fact
+	if it.Outcome != "" {
+		switch it.Outcome {
+		case "verified", "negative", "blocked", "incomplete":
+		default:
+			return 0, false, fmt.Errorf("outcome must be verified, negative, blocked or incomplete")
+		}
+		if strings.TrimSpace(it.TestDimension) == "" || strings.TrimSpace(it.Evidence) == "" || len(anchors) == 0 {
+			return 0, false, fmt.Errorf("structured outcome requires test_dimension, evidence and explicit tested asset_ids; do not claim untested intent assets were covered")
+		}
+		payload["outcome"], payload["test_dimension"], payload["tested_asset_ids"] = it.Outcome, strings.TrimSpace(it.TestDimension), anchors
 	}
-	t.writes.Facts++
-	return id, nil
+	if it.RevisitCondition != "" {
+		payload["revisit_condition"] = it.RevisitCondition
+	}
+	if it.Checkpoint != "" {
+		payload["checkpoint"] = it.Checkpoint
+	}
+	id, created, err := t.ts.RecordFact(ctx, intent, payload, anchors, t.worker, it.Supersedes)
+	if err == nil && created {
+		t.writes.Facts++
+	}
+	return id, created, err
 }
 
 func (t *ToolSet) recordFact() actool.CoreTool {
@@ -1487,15 +1555,20 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 		"  · confidence = observed (seen directly in output) | inferred (inferred from phenomena).\n"+
 		"  · **Negative conclusions** (not injectable / port closed / no entry found, etc.) state only \"observation + tentative reading\" — state what you actually saw; whether to abandon the direction is for the planner to decide globally; always provide evidence, mark inferred when the means weren't exhausted or the evidence is weak (including probed only once, looks-like), and mark observed only when truly exhausted and directly seen.",
 		obj(map[string]any{
-			"facts":      map[string]any{"type": "array", "description": "[use when there are several distinct conclusions] array of facts; element fields same as the top-level fields below (summary/detail/evidence/confidence/intent_id/asset_ids); omitting intent_id falls back to the top-level intent_id. The returned ids match this array in length and order.", "items": map[string]any{"type": "object"}},
-			"summary":    str("a [one-sentence summary] of this exploration's conclusion (a condensation of detail)"),
-			"intent_id":  idp("the id of the intent that produced this fact (the intent you claimed; the default for each item in batch mode)"),
-			"detail":     str("details related to this fact: write all of this exploration's observations here"),
-			"evidence":   str("[one line] of key evidence: the command + the one or two most proving output lines. Keep it brief; don't paste large output blocks (details go in detail)."),
-			"confidence": str("observed (seen directly in output) | inferred (inferred from phenomena). Always label negative conclusions honestly."),
-			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "related asset ids (optional, 0/1/many): which assets this fact involves"},
+			"facts":             map[string]any{"type": "array", "description": "[use when there are several distinct conclusions] array of facts; element fields same as the top-level fields below (summary/detail/evidence/confidence/intent_id/asset_ids); omitting intent_id falls back to the top-level intent_id. The returned ids match this array in length and order.", "items": map[string]any{"type": "object"}},
+			"supersedes":        intp("optional active fact ID from this same intent to replace with a complete new revision; original evidence is retained"),
+			"outcome":           str("verified | negative | blocked | incomplete; requires explicit tested asset_ids, test_dimension and evidence"),
+			"test_dimension":    str("what was actually checked, including identity/environment; never treat one check as full host coverage"),
+			"revisit_condition": str("specific prerequisite or new evidence required before reopening this direction"),
+			"checkpoint":        str("completed steps, artifact paths and remaining work; do not include secrets"),
+			"summary":           str("a [one-sentence summary] of this exploration's conclusion (a condensation of detail)"),
+			"intent_id":         idp("the id of the intent that produced this fact (the intent you claimed; the default for each item in batch mode)"),
+			"detail":            str("details related to this fact: write all of this exploration's observations here"),
+			"evidence":          str("[one line] of key evidence: the command + the one or two most proving output lines. Keep it brief; don't paste large output blocks (details go in detail)."),
+			"confidence":        str("observed (seen directly in output) | inferred (inferred from phenomena). Always label negative conclusions honestly."),
+			"asset_ids":         map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "related asset ids (optional, 0/1/many): which assets this fact involves"},
 		}),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				Facts    []factItem `json:"facts"`
 				factItem            // single mode + batch default intent_id
@@ -1510,22 +1583,29 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 
 			ids := make([]int64, len(items))
 			errs := map[string]string{}
+			duplicates := []int{}
 			for i, it := range items {
-				id, err := t.recordOneFact(it, defaultIntent)
+				id, created, err := t.recordFactItem(ctx, it, defaultIntent)
 				if err != nil {
 					errs[strconv.Itoa(i)] = err.Error()
 					continue
 				}
 				ids[i] = id
+				if !created {
+					duplicates = append(duplicates, i)
+				}
 			}
 
 			if !batch { // single: keep the original return
 				if e, bad := errs["0"]; bad {
 					return actool.Errorf(e), nil
 				}
+				if len(duplicates) > 0 {
+					return actool.Text(fmt.Sprintf("fact already recorded: %d; unchanged, do not write it again", ids[0])), nil
+				}
 				return actool.Text(fmt.Sprintf("fact recorded: %d", ids[0])), nil
 			}
-			out := map[string]any{"ids": ids}
+			out := map[string]any{"ids": ids, "unchanged_indices": duplicates}
 			if len(errs) > 0 {
 				out["errors"] = errs
 			}
