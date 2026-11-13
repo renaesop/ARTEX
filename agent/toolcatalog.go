@@ -140,7 +140,7 @@ func DecorateTool(t actool.CoreTool, desc string, schema map[string]any) actool.
 	if len(schema) == 0 {
 		schema = t.InputSchema()
 	}
-	return &overriddenTool{CoreTool: t, desc: desc, schema: schema}
+	return &overriddenTool{CoreTool: t, desc: desc, schema: RepairBuiltinToolSchema(t.Name(), schema)}
 }
 
 // overriddenTool is a CoreTool decorator: it embeds the original (so all behavioral
