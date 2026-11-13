@@ -1489,7 +1489,7 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error)
 
 func (t *ToolSet) recordFactItem(ctx context.Context, it factItem, defaultIntent int64) (int64, bool, error) {
 	if strings.TrimSpace(it.Summary) == "" {
-		return 0, false, fmt.Errorf("summary must not be empty")
+		return 0, false, fmt.Errorf("summary must not be empty: provide a complete fact with a one-sentence summary, including when using supersedes; revisions are not partial patches")
 	}
 	payload := map[string]any{"summary": it.Summary}
 	if it.Detail != "" {
@@ -1554,27 +1554,23 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 		"  · evidence = [one line] of key evidence supporting this conclusion (the command + the one or two most proving output lines), **keep it brief** — details belong in detail; don't paste large output blocks here.\n"+
 		"  · confidence = observed (seen directly in output) | inferred (inferred from phenomena).\n"+
 		"  · **Negative conclusions** (not injectable / port closed / no entry found, etc.) state only \"observation + tentative reading\" — state what you actually saw; whether to abandon the direction is for the planner to decide globally; always provide evidence, mark inferred when the means weren't exhausted or the evidence is weak (including probed only once, looks-like), and mark observed only when truly exhausted and directly seen.",
-		obj(map[string]any{
-			"facts":             map[string]any{"type": "array", "description": "[use when there are several distinct conclusions] array of facts; element fields same as the top-level fields below (summary/detail/evidence/confidence/intent_id/asset_ids); omitting intent_id falls back to the top-level intent_id. The returned ids match this array in length and order.", "items": map[string]any{"type": "object"}},
-			"supersedes":        intp("optional active fact ID from this same intent to replace with a complete new revision; original evidence is retained"),
-			"outcome":           str("verified | negative | blocked | incomplete; requires explicit tested asset_ids, test_dimension and evidence"),
-			"test_dimension":    str("what was actually checked, including identity/environment; never treat one check as full host coverage"),
-			"revisit_condition": str("specific prerequisite or new evidence required before reopening this direction"),
-			"checkpoint":        str("completed steps, artifact paths and remaining work; do not include secrets"),
-			"summary":           str("a [one-sentence summary] of this exploration's conclusion (a condensation of detail)"),
-			"intent_id":         idp("the id of the intent that produced this fact (the intent you claimed; the default for each item in batch mode)"),
-			"detail":            str("details related to this fact: write all of this exploration's observations here"),
-			"evidence":          str("[one line] of key evidence: the command + the one or two most proving output lines. Keep it brief; don't paste large output blocks (details go in detail)."),
-			"confidence":        str("observed (seen directly in output) | inferred (inferred from phenomena). Always label negative conclusions honestly."),
-			"asset_ids":         map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "related asset ids (optional, 0/1/many): which assets this fact involves"},
-		}),
+		recordFactSchema(),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				Facts    []factItem `json:"facts"`
 				factItem            // single mode + batch default intent_id
 			}
-			_ = json.Unmarshal(in, &a)
-			batch := len(a.Facts) > 0
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("invalid record_fact input: " + err.Error() + "; no facts were written"), nil
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(in, &fields); err != nil || fields == nil {
+				return actool.Errorf("record_fact input must be an object; no facts were written"), nil
+			}
+			_, batch := fields["facts"]
+			if batch && len(a.Facts) == 0 {
+				return actool.Errorf("facts must be a non-empty array of complete facts, each with a summary; for a single fact omit facts and provide summary. No facts were written"), nil
+			}
 			items := a.Facts
 			if !batch {
 				items = []factItem{a.factItem}
@@ -1609,7 +1605,12 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 			if len(errs) > 0 {
 				out["errors"] = errs
 			}
-			return jsonResult(out)
+			if len(errs) > 0 {
+				out["retry_instruction"] = "Retry only indices listed in errors with corrected complete facts; nonzero ids were saved and must not be resubmitted."
+			}
+			result, err := jsonResult(out)
+			result.IsError = result.IsError || len(errs) > 0
+			return result, err
 		})
 }
 
