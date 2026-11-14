@@ -2,6 +2,25 @@ package agent
 
 import "encoding/json"
 
+func addIntentSchema() map[string]any {
+	props := map[string]any{
+		"summary":    str("What to do and why; required on every item."),
+		"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "Target asset IDs, when known."},
+		"parent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "Existing fact/finding IDs supporting this direction, not intent IDs."},
+		"priority":   intp("Priority 0-10, default 5."),
+		"not_before": str("Optional earliest useful execution time, RFC3339 with timezone, e.g. 2026-11-14T11:12:00+08:00. Required for future observation checkpoints. The intent stays open but cannot occupy a worker until due. In batches set this on each delayed item, not on the enclosing object."),
+	}
+	item := obj(props, "summary")
+	top := make(map[string]any, len(props)+1)
+	for k, v := range props {
+		top[k] = v
+	}
+	top["intents"] = map[string]any{"type": "array", "minItems": 1, "items": item, "description": "Batch of complete intents; fields do not inherit from the enclosing object."}
+	schema := obj(top)
+	schema["anyOf"] = []any{map[string]any{"required": []string{"summary"}}, map[string]any{"required": []string{"intents"}}}
+	return schema
+}
+
 func factItemSchema() map[string]any {
 	schema := obj(map[string]any{
 		"summary":    str("a [one-sentence summary] of this exploration's conclusion (a condensation of detail)"),
@@ -40,6 +59,8 @@ func recordFactSchema() map[string]any {
 func RepairBuiltinToolSchema(name string, stored map[string]any) map[string]any {
 	var canonical map[string]any
 	switch name {
+	case "add_intent":
+		canonical = addIntentSchema()
 	case "record_fact":
 		canonical = recordFactSchema()
 	case "list_task_credentials":

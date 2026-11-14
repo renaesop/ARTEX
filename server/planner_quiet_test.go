@@ -2,6 +2,7 @@ package server
 
 import (
 	"testing"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
 )
@@ -73,6 +74,36 @@ func TestPlannerQuietSkipEdge(t *testing.T) {
 	if e.quietSkipEdge(tt) {
 		t.Fatal("no active intent must allow planning")
 	}
+	// A delayed follow-up keeps the task alive, but idle workers still need
+	// an edge round when the last immediately runnable intent finishes.
+	_, err = store.AddIntent(map[string]any{
+		"summary": "later", "not_before": time.Now().Add(time.Hour).Format(time.RFC3339),
+	}, 0, nil, "planner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.quietSkipEdge(tt) {
+		t.Fatal("a future intent alone must not suppress the edge round")
+	}
+	if active, err := store.HasActiveIntent(); err != nil || !active {
+		t.Fatalf("delayed intent must still keep the task alive: active=%v err=%v", active, err)
+	}
+	due, err := store.AddIntent(map[string]any{
+		"summary": "due", "not_before": time.Now().Add(-time.Minute).Format(time.RFC3339),
+	}, 0, nil, "planner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !e.quietSkipEdge(tt) {
+		t.Fatal("an eligible scheduled intent counts as runnable")
+	}
+	if ok, err := store.ClaimIntent(due, "work#1"); err != nil || !ok {
+		t.Fatalf("claim due intent: ok=%v err=%v", ok, err)
+	}
+	if !e.quietSkipEdge(tt) {
+		t.Fatal("running intent must suppress redundant planning")
+	}
+
 }
 
 // The quiet-mode switch is editable mid-run (#86): PATCHing plan_quiet_mode
