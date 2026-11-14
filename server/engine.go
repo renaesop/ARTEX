@@ -770,13 +770,10 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 		runTaskRoutine(rt, func(loopCtx context.Context) { e.workerLoop(loopCtx, t, name) })
 	}
 	e.startDeadlineCoordinator(ctx, t) // task-level timeout timer (only when timeout>0; deduplicated)
-	// Kick the first planning round only when there are no active intents at all
-	// (open+running). For a task with seeded intents: the seed is already open, or the
-	// worker just started above has claimed it as running first — both count as "work
-	// exists", so skip the first planner round: the worker runs the seed intent directly and NotifyDone/heartbeat wakes the planner when done.
-	// ⚠️ Do not use Frontier (counts only open): a worker claiming (open→running) races with this check and would kick spuriously. After a restart-driven auto-recovery only running intents may remain — skip then too.
-	if has, _ := t.Store.HasActiveIntent(); !has {
-		t.Notify() // kick the first planning round (acted on once LLM is ready)
+	// A worker may already have claimed a ready seed. A delayed seed alone
+	// leaves workers idle, so give the planner its initial round.
+	if has, err := t.Store.HasRunnableOrRunningIntent(); err != nil || !has {
+		t.Notify()
 	}
 }
 
@@ -803,7 +800,7 @@ func resetPlannerTimer(timer *time.Timer, d time.Duration) {
 
 // quietSkipEdge reports whether an edge-triggered planning round should be
 // dropped (#79): the open-goal set is unchanged since the last completed round
-// AND active work exists (open or running intents). Fails open (false) on any
+// AND runnable or running work exists. Fails open (false) on any
 // store error: when in doubt, plan, preserving the pre-quiet-mode behavior.
 func (e *Engine) quietSkipEdge(t *Task) bool {
 	fp, err := t.Store.OpenGoalFingerprint()
@@ -813,7 +810,7 @@ func (e *Engine) quietSkipEdge(t *Task) bool {
 	if last, ok := e.goalFP.Load(t.ID); !ok || last != fp {
 		return false
 	}
-	active, err := t.Store.HasActiveIntent()
+	active, err := t.Store.HasRunnableOrRunningIntent()
 	return err == nil && active
 }
 
@@ -1280,7 +1277,7 @@ func sleepCtx(ctx context.Context, d time.Duration) (done bool) {
 }
 
 func (e *Engine) claimNext(t *Task, name string) *db.Node {
-	fr, _ := t.Store.Frontier(20)
+	fr, _ := t.Store.ReadyFrontier(20)
 	for _, in := range fr {
 		if ok, _ := t.Store.ClaimIntent(in.ID, name); ok {
 			return in

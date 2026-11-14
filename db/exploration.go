@@ -195,6 +195,13 @@ func (s *ExplorationStore) Root() (description, goal string, err error) {
 
 // AddNode writes a typed reasoning node with optional anchors to asset ids.
 func (s *ExplorationStore) AddNode(kind string, payload map[string]any, priority int, state, origin string, anchors []int64) (int64, error) {
+	if kind == KindIntent {
+		var err error
+		payload, err = normalizeIntentSchedule(payload)
+		if err != nil {
+			return 0, err
+		}
+	}
 	raw, _ := json.Marshal(payload)
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -1217,7 +1224,7 @@ WHERE exploration_id=$1 AND kind='goal' AND state='open' ORDER BY id`, s.expID)
 // ClaimIntent atomically moves an open intent to running. Returns true if claimed.
 func (s *ExplorationStore) ClaimIntent(id int64, owner string) (bool, error) {
 	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='running', owner=$1
-WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open'`, owner, id, s.expID)
+WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open' AND `+intentReadySQL, owner, id, s.expID)
 	if err != nil {
 		return false, err
 	}
